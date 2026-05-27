@@ -16,14 +16,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# NOTE: paths below are relative to the REPOSITORY ROOT, because RunPod's
+# GitHub build (and `docker build -f runpod-worker/Dockerfile .`) uses the repo
+# root as the build context. Build locally from the repo root, not from here.
+
 # Install PyTorch (CUDA 12.1 wheels) first, then the rest.
 RUN pip3 install --no-cache-dir \
         torch==2.4.1 \
         --index-url https://download.pytorch.org/whl/cu121
 
-COPY requirements.txt .
+COPY runpod-worker/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-COPY handler.py .
+COPY runpod-worker/handler.py .
 
 CMD ["python3", "-u", "handler.py"]

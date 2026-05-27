@@ -1,0 +1,13 @@
+# Build context = repo root (for RunPod GitHub build). Keep it small:
+# only runpod-worker/ files are needed by the Dockerfile.
+web/
+.git/
+.github/
+**/node_modules/
+**/.next/
+**/__pycache__/
+**/hf-cache/
+*.md
+.env
+.env.*
+.DS_Store
