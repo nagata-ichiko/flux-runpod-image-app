@@ -14,29 +14,39 @@ os.environ.setdefault(
 
 import base64
 import io
+import traceback
 
 import runpod
 import torch
-from diffusers import FluxPipeline
 
 MODEL_ID = os.environ.get("MODEL_ID", "black-forest-labs/FLUX.1-schnell")
 
-# --- Cold start: load the pipeline once per worker process -------------------
-# FLUX.1-schnell in bf16 needs ~24GB VRAM. On smaller GPUs, set
-# ENABLE_CPU_OFFLOAD=1 to trade speed for lower VRAM usage.
-print(f"Loading pipeline: {MODEL_ID} (cache: {os.environ['HF_HOME']})")
-pipe = FluxPipeline.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16)
-
-if os.environ.get("ENABLE_CPU_OFFLOAD") == "1":
-    pipe.enable_model_cpu_offload()
-else:
-    pipe.to("cuda")
-
-print("Pipeline ready.")
-
-# schnell is a 4-step distilled model; values above its limits are clamped.
 MAX_STEPS = 8
 MAX_SIZE = 1536
+
+# Load the pipeline LAZILY on the first request, NOT at import time. Loading the
+# ~33GB model at module import made the worker exceed RunPod's startup timeout
+# and get killed before runpod.serverless.start() could run (crash loop, jobs
+# stuck IN_QUEUE). Deferring it lets the worker become ready immediately; the
+# heavy load happens inside the (long-timeout) job instead, and any load error
+# is returned as the job result.
+_pipe = None
+
+
+def _get_pipe():
+    global _pipe
+    if _pipe is None:
+        from diffusers import FluxPipeline
+
+        print(f"Loading pipeline: {MODEL_ID} (cache: {os.environ['HF_HOME']})")
+        pipe = FluxPipeline.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16)
+        if os.environ.get("ENABLE_CPU_OFFLOAD") == "1":
+            pipe.enable_model_cpu_offload()
+        else:
+            pipe.to("cuda")
+        _pipe = pipe
+        print("Pipeline ready.")
+    return _pipe
 
 
 def _clamp(value, lo, hi, default):
@@ -54,6 +64,11 @@ def handler(job):
     if not prompt:
         return {"error": "prompt is required"}
 
+    try:
+        pipe = _get_pipe()
+    except Exception as e:
+        return {"error": f"model load failed: {e!r}", "traceback": traceback.format_exc()}
+
     width = _clamp(job_input.get("width", 1024), 256, MAX_SIZE, 1024)
     height = _clamp(job_input.get("height", 1024), 256, MAX_SIZE, 1024)
     # round to multiples of 16 (required by the VAE)
@@ -66,19 +81,22 @@ def handler(job):
     if seed is not None:
         try:
             seed = int(seed)
-            generator = torch.Generator("cuda").manual_seed(seed)
+            generator = torch.Generator("cpu").manual_seed(seed)
         except (TypeError, ValueError):
             seed = None
 
-    image = pipe(
-        prompt=prompt,
-        width=width,
-        height=height,
-        num_inference_steps=steps,
-        guidance_scale=0.0,  # schnell is guidance-distilled
-        max_sequence_length=256,
-        generator=generator,
-    ).images[0]
+    try:
+        image = pipe(
+            prompt=prompt,
+            width=width,
+            height=height,
+            num_inference_steps=steps,
+            guidance_scale=0.0,  # schnell is guidance-distilled
+            max_sequence_length=256,
+            generator=generator,
+        ).images[0]
+    except Exception as e:
+        return {"error": f"inference failed: {e!r}", "traceback": traceback.format_exc()}
 
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
