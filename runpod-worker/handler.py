@@ -33,13 +33,23 @@ MAX_SIZE = 1536
 _pipe = None
 
 
+def _hf_token():
+    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
+
 def _get_pipe():
     global _pipe
     if _pipe is None:
         from diffusers import FluxPipeline
 
-        print(f"Loading pipeline: {MODEL_ID} (cache: {os.environ['HF_HOME']})")
-        pipe = FluxPipeline.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16)
+        token = _hf_token()
+        print(
+            f"Loading pipeline: {MODEL_ID} (cache: {os.environ['HF_HOME']}, "
+            f"hf_token={'set' if token else 'MISSING'})"
+        )
+        # FLUX.1-schnell is a gated repo: pass the token explicitly so auth does
+        # not depend on env-var resolution quirks inside huggingface_hub.
+        pipe = FluxPipeline.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16, token=token)
         if os.environ.get("ENABLE_CPU_OFFLOAD") == "1":
             pipe.enable_model_cpu_offload()
         else:
@@ -67,7 +77,13 @@ def handler(job):
     try:
         pipe = _get_pipe()
     except Exception as e:
-        return {"error": f"model load failed: {e!r}", "traceback": traceback.format_exc()}
+        tok = _hf_token()
+        return {
+            "error": f"model load failed: {e!r}",
+            "hf_token_seen": bool(tok),
+            "hf_token_len": len(tok) if tok else 0,
+            "traceback": traceback.format_exc(),
+        }
 
     width = _clamp(job_input.get("width", 1024), 256, MAX_SIZE, 1024)
     height = _clamp(job_input.get("height", 1024), 256, MAX_SIZE, 1024)
