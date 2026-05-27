@@ -1,0 +1,35 @@
+# ---- Secrets (NEVER commit — this is a public repo) ----
+.env
+.env.*
+!.env.example
+!*.env.example
+*.key
+*.pem
+
+# ---- Node / Next.js ----
+node_modules/
+.next/
+out/
+build/
+.vercel/
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---- Python / worker ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+hf-cache/
+*.safetensors
+
+# ---- OS / editor ----
+.DS_Store
+.idea/
+.vscode/
+
+# ---- Claude Code local settings (personal, not for sharing) ----
+.claude/settings.local.json

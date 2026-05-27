@@ -1,0 +1,9 @@
+{
+  "input": {
+    "prompt": "a cozy bookstore cafe on a rainy evening, warm lighting, cinematic",
+    "width": 1024,
+    "height": 1024,
+    "num_inference_steps": 4,
+    "seed": 42
+  }
+}
