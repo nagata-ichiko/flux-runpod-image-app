@@ -20,10 +20,14 @@ WORKDIR /app
 # GitHub build (and `docker build -f runpod-worker/Dockerfile .`) uses the repo
 # root as the build context. Build locally from the repo root, not from here.
 
-# Install PyTorch (CUDA 12.1 wheels) first, then the rest.
+# Install PyTorch with CUDA 12.8 wheels — these include Blackwell (sm_120)
+# kernels required by RunPod's newer GPUs (e.g. RTX PRO 6000 Blackwell). The
+# cu121 wheels only went up to sm_90 and crashed on Blackwell with
+# "no kernel image is available for execution on the device". cu128 also runs
+# on older Ampere/Ada/Hopper GPUs, so it works regardless of what RunPod assigns.
 RUN pip3 install --no-cache-dir \
-        torch==2.4.1 \
-        --index-url https://download.pytorch.org/whl/cu121
+        torch==2.7.0 \
+        --index-url https://download.pytorch.org/whl/cu128
 
 COPY runpod-worker/requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
