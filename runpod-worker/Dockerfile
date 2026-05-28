@@ -1,37 +1,28 @@
-# FLUX.1-schnell serverless worker for RunPod (network-volume / lazy-download)
-# The model is NOT baked in — it is downloaded on first cold start to the
-# attached network volume (/runpod-volume) and cached there. Keeps this image small.
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+# FLUX.1-schnell serverless worker for RunPod, built on the official
+# worker-comfyui base image. ComfyUI + the RunPod handler are already baked in;
+# we only overlay model-path config and a model-download bootstrap.
+#
+# Build context is the REPOSITORY ROOT (paths below are relative to it):
+#   docker build -f runpod-worker/Dockerfile -t flux-comfy-worker .
+# RunPod's GitHub integration does the same thing automatically.
+FROM runpod/worker-comfyui:5.3.0-base-cuda12.8.1
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 \
-        python3-pip \
-        git \
-    && rm -rf /var/lib/apt/lists/*
+# hf_transfer + a recent huggingface_hub for fast multipart downloads onto the
+# network volume. (huggingface_hub is already in the base image; this just pins
+# a known-good version range.)
+RUN pip install --no-cache-dir "huggingface_hub>=0.24.0" "hf_transfer>=0.1.6"
 
-WORKDIR /app
+# Point ComfyUI at /runpod-volume/models/* (overrides the file shipped by the
+# base image — ours adds `diffusion_models`).
+COPY runpod-worker/extra_model_paths.yaml /comfyui/extra_model_paths.yaml
 
-# NOTE: paths below are relative to the REPOSITORY ROOT, because RunPod's
-# GitHub build (and `docker build -f runpod-worker/Dockerfile .`) uses the repo
-# root as the build context. Build locally from the repo root, not from here.
+# Bootstrap that downloads FLUX weights into the network volume on first start.
+COPY runpod-worker/download_models.py /download_models.py
+COPY runpod-worker/runpod_start.sh /runpod_start.sh
+RUN chmod +x /runpod_start.sh
 
-# Install PyTorch with CUDA 12.8 wheels — these include Blackwell (sm_120)
-# kernels required by RunPod's newer GPUs (e.g. RTX PRO 6000 Blackwell). The
-# cu121 wheels only went up to sm_90 and crashed on Blackwell with
-# "no kernel image is available for execution on the device". cu128 also runs
-# on older Ampere/Ada/Hopper GPUs, so it works regardless of what RunPod assigns.
-RUN pip3 install --no-cache-dir \
-        torch==2.7.0 \
-        --index-url https://download.pytorch.org/whl/cu128
-
-COPY runpod-worker/requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
-
-COPY runpod-worker/handler.py .
-
-CMD ["python3", "-u", "handler.py"]
+# Override the base image's CMD so we run model bootstrap before the official
+# /start.sh (which then runs ComfyUI + the RunPod handler).
+CMD ["/runpod_start.sh"]

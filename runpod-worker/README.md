@@ -1,106 +1,137 @@
-# RunPod Serverless Worker — FLUX.1-schnell
+# RunPod Serverless Worker — FLUX.1-schnell (ComfyUI ベース)
 
-テキストから画像を生成する RunPod Serverless ワーカーです。FLUX.1-schnell（Apache-2.0 / ゲートなし）を使います。
+RunPod Serverless 上で **ComfyUI** を動かす FLUX.1-schnell ワーカーです。任意の ComfyUI ワークフロー (API 形式 JSON) をリクエストで投げて画像を生成できます。
 
-- **モデル方式**: ネットワークボリューム + 遅延ダウンロード（初回起動時に `/runpod-volume` へDLしてキャッシュ。イメージは ~5GB と軽量）
-- **デプロイ方式**: GitHub 連携（RunPod がリポジトリから自動ビルド。ローカル Docker 不要）
+- **ベースイメージ**: [`runpod/worker-comfyui:5.3.0-base-cuda12.8.1`](https://hub.docker.com/r/runpod/worker-comfyui)（ComfyUI + RunPod ハンドラ同梱）
+- **モデル方式**: ネットワークボリューム + 遅延ダウンロード（初回起動時に `/runpod-volume/models/` へDL）
+- **デプロイ方式**: GitHub 連携（RunPod がリポジトリから自動ビルド）
+- **Pods/Serverless 両対応**: 同じイメージ・同じ Network Volume を共有可能
 
-> ⚠️ ビルドコンテキストは**リポジトリのルート**です。Dockerfile 内の `COPY` はルート基準（`runpod-worker/...`）になっています。
+> ⚠️ ビルドコンテキストは**リポジトリのルート**です。Dockerfile 内の `COPY` はルート基準（`runpod-worker/...`）です。
 
 ---
 
-## 方法A（推奨）: GitHub から RunPod に自動ビルドさせる
+## アーキテクチャ
 
-ローカルでの `docker build` / `docker push` も Docker Hub も不要です。
+```
+リクエスト ──► RunPod Serverless ──► /runpod_start.sh ──► download_models.py
+                                                       └─► /start.sh (公式)
+                                                              ├─► ComfyUI server (background)
+                                                              └─► /handler.py (RunPod handler)
+```
+
+1. コンテナ起動時に `runpod_start.sh` が走り、`/runpod-volume/models/` に必要な FLUX のウェイトが揃っているか確認（無ければ DL）。
+2. その後、公式 `/start.sh` に処理を委譲して ComfyUI と RunPod ハンドラが起動。
+3. ハンドラは `input.workflow` で受け取った Comfy API 形式 JSON を実行して、生成画像を base64 で返す。
+
+---
+
+## デプロイ手順（GitHub 連携）
 
 ### 1. GitHub を RunPod に接続
-RunPod Console → **Settings** → **Connections** の **GitHub** カードで **Connect** → 認可（リポジトリは "All" か対象リポジトリを選択）→ **Save**
+RunPod Console → **Settings** → **Connections** の **GitHub** カードで **Connect**。
 
 ### 2. ネットワークボリュームを作成
 RunPod Console → **Storage** → **New Network Volume**
-- **サイズ**: 50GB 以上（モデルは ~33GB）
-- **リージョン**: ここで選んだリージョンの GPU しか後で使えません。GPU 在庫が豊富なリージョンを推奨
+- **サイズ**: 100GB 以上推奨（FLUX 本体 ~24GB + VAE/CLIP/T5 + LoRA 等の余地）
+- **リージョン**: 後で使う GPU と同じリージョン
 
-### 3. Endpoint を作成（GitHubから）
+### 3. Serverless Endpoint を作成
 RunPod Console → **Serverless** → **New Endpoint** → **Import Git Repository**
-- リポジトリ: `nagata-ichiko/flux-runpod-image-app`
+- リポジトリ: 本リポジトリ
 - **Branch**: `main`
-- **Dockerfile Path**: `runpod-worker/Dockerfile`  ← これだけ指定（コンテキストはルート固定）
-- **Next** → 設定:
-  - **Endpoint Name**: 任意
-  - **Endpoint Type**: `Queue`
-  - **GPU**: 24GB 以上（RTX 4090 / L4 / A5000 など、ボリュームと同リージョン）
-  - **Network Volume**: 手順2のボリュームを選択（自動で `/runpod-volume` にマウント）
-  - 16GB GPU で動かす場合は環境変数 `ENABLE_CPU_OFFLOAD=1` を追加（遅くなる）
-- **Deploy Endpoint** → RunPod がビルド＆デプロイ
+- **Dockerfile Path**: `runpod-worker/Dockerfile`
+- **GPU**: 24GB 以上（RTX 4090 / L4 / A5000 など、Volume と同リージョン）
+- **Network Volume**: 手順2のボリューム（`/runpod-volume` にマウント）
+- **環境変数**:
+  - `HF_TOKEN` … 必須ではないが、Hugging Face のレート制限対策に推奨
+- **Deploy Endpoint**
 
-完了後に表示される **Endpoint ID** を控える → Web アプリの `.env.local` に設定。
-以降、`main` に push するたび自動で再ビルドされます。
-
-> GitHub ビルドの制約: イメージ 80GB 以下 / ビルド 160分以内 / ビルド時に GPU 不可。今回の構成はすべて満たしています（モデルDLは実行時なのでビルドにGPU不要）。
+初回ジョブでモデル ~24GB を DL するため、最初の1回だけコールドスタートが長い（5〜10分）。2回目以降は Volume にキャッシュされているのですぐ動きます。
 
 ---
 
-## 方法B（代替）: ローカルでビルドして push
+## 同じ構成を Pods でも動かす（ワークフロー開発用）
 
-Docker Hub 等を使う場合。**リポジトリのルートから**実行します（`runpod-worker/` の中ではない）。
+ComfyUI の GUI でノードを組み立てたいときは、**同じ Network Volume を Pods にもアタッチ**すると、Serverless と本物のモデル共有ができます。
 
-```bash
-# repo ルートで実行
-docker build --platform linux/amd64 -f runpod-worker/Dockerfile -t <your-dockerhub-user>/flux-schnell-worker:latest .
-docker push <your-dockerhub-user>/flux-schnell-worker:latest
-```
-あとは方法Aの手順2〜3と同様に、Container Image を指定して Endpoint を作成します。
-`--platform linux/amd64` は必須（arm64 でビルドすると GPU で動きません）。
+1. RunPod Console → **Pods** → **Deploy**
+2. **Custom Container Image** に同じイメージ（CI で push しているタグ）を指定するか、公式の `runpod/worker-comfyui:5.3.0-base-cuda12.8.1` を直接使用
+3. **Container Start Command** を ComfyUI 直叩きに上書き:
+   ```
+   bash -c "python3 -u /download_models.py && python3 /comfyui/main.py --listen 0.0.0.0 --port 8188"
+   ```
+4. **HTTP Ports** に `8188` を追加
+5. **Network Volume**: Serverless と同じものをマウント
+6. デプロイ後、Pod の **Connect → HTTP Service [8188]** からブラウザで GUI へ
+
+Pod の GUI でワークフローを作成 → **Save (API Format)** → `runpod-worker/workflows/` に置いて push、で Serverless 側でも同じワークフローが動きます。
 
 ---
 
 ## 入力フォーマット
 
+ComfyUI API 形式の workflow JSON を `input.workflow` に渡します:
+
 ```json
 {
   "input": {
-    "prompt": "a red fox in a snowy forest",
-    "width": 1024,
-    "height": 1024,
-    "num_inference_steps": 4,
-    "seed": 42
+    "workflow": { ... API 形式の Comfy ワークフロー ... }
   }
 }
 ```
 
-- `prompt`（必須）: 英語推奨
-- `width` / `height`: 256〜1536（16の倍数に丸められます）
-- `num_inference_steps`: 1〜8（schnell は 4 が標準）
-- `seed`: 任意。固定すると再現可能
+サンプル: [`test_input.json`](./test_input.json) / [`workflows/flux_schnell.json`](./workflows/flux_schnell.json)
+
+ワークフローの作り方:
+- ComfyUI の GUI で組み立て → **Save (API Format)** で JSON エクスポート（**通常の Save とは別物**なので注意）
+- そのまま `input.workflow` に貼って投げる
 
 ## 出力フォーマット
 
+公式 worker-comfyui の仕様に準拠:
+
 ```json
 {
-  "image": "<base64 PNG>",
-  "format": "png",
-  "width": 1024,
-  "height": 1024,
-  "steps": 4,
-  "seed": 42
+  "output": {
+    "images": [
+      {
+        "filename": "flux_schnell_00001_.png",
+        "type": "base64",
+        "data": "<base64 PNG>"
+      }
+    ]
+  }
 }
 ```
 
-## デプロイ後の動作確認 (curl)
+S3 を設定すれば URL 返却にも変更可能（環境変数 `BUCKET_ENDPOINT_URL` などで設定 — 公式ドキュメント参照）。
+
+## 動作確認 (curl)
 
 ```bash
 curl -s -X POST https://api.runpod.ai/v2/<ENDPOINT_ID>/runsync \
   -H "Authorization: Bearer <RUNPOD_API_KEY>" \
   -H "Content-Type: application/json" \
-  -d @runpod-worker/test_input.json | python3 -c "import sys,json,base64; d=json.load(sys.stdin); open('out.png','wb').write(base64.b64decode(d['output']['image'])); print('saved out.png')"
+  -d @runpod-worker/test_input.json
 ```
 
-## 補足: イメージ焼き込み方式にしたい場合
+---
 
-ボリュームを使わず全部イメージに含めるなら、Dockerfile の `COPY runpod-worker/handler.py .` の前に以下を足します（イメージは ~33GB に）。
+## ファイル構成
 
-```dockerfile
-COPY runpod-worker/builder/download_model.py builder/download_model.py
-RUN python3 builder/download_model.py
-```
+| ファイル | 役割 |
+|---|---|
+| `Dockerfile` | 公式 `worker-comfyui:5.3.0-base-cuda12.8.1` をベースに、モデル DL ブートストラップを上乗せ |
+| `runpod_start.sh` | `/start.sh`（公式）の前にモデル DL を走らせる shim |
+| `download_models.py` | `/runpod-volume/models/` に FLUX のウェイトを DL（既存ファイルはスキップ） |
+| `extra_model_paths.yaml` | ComfyUI に `/runpod-volume/models/*` を認識させる設定（公式版を上書き） |
+| `workflows/flux_schnell.json` | サンプル ワークフロー（API 形式） |
+| `test_input.json` | `curl` 用のサンプル入力 |
+
+## カスタマイズ
+
+- **モデル追加**: Pod 等で `/runpod-volume/models/<種別>/` に safetensors を置けば即使用可能
+- **LoRA**: `/runpod-volume/models/loras/` に置いて、ワークフローに `LoraLoader` ノードを足す
+- **ControlNet**: `/runpod-volume/models/controlnet/` に置く
+- **カスタムノード**: Dockerfile に `RUN comfy-node-install <repo-url>` を追加するか、Pod 上の Comfy Manager から入れて Volume 経由で共有
